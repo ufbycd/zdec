@@ -33,9 +33,19 @@
 
 ## Run Example
 
+zlvgl and zdev are both hosted on github.com and gitee.com
+
 ```
 $ git clone https://github.com/ufbycd/zlvgl.git
 $ git clone https://github.com/ufbycd/zdec.git
+```
+or
+```
+$ git clone https://github.com/ufbycd/zlvgl.git
+$ git clone https://github.com/ufbycd/zdec.git
+```
+then build and run
+```
 $ cd zdec
 $ zig build run
 ```
