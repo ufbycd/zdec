@@ -119,7 +119,7 @@ pub const Range = struct {
     }
 };
 
-pub const BindType = enum {
+pub const BindingType = enum {
     Value,
     Text,
     Pos,
@@ -128,62 +128,148 @@ pub const BindType = enum {
     Style,
     States,
     Flags,
+
+    fn DataType(comptime self: BindingType) type {
+        return switch (self) {
+            .Value => i32,
+            .Text => ?[:0]u8,
+            .Pos => Pos,
+            .Size => Size,
+            .Align => Align,
+            else => unreachable,
+        };
+    }
 };
+
+fn BindingInfo(comptime binding_type: BindingType, comptime PropertyType: type) type {
+    const ValueType = PropertyType.ValueType;
+    return struct {
+        allocator: std.mem.Allocator,
+        property: ?*PropertyType,
+        nativeObj: ?*lv.c.lv_obj_t,
+        to_view: ?*const fn (alloc: std.mem.Allocator, value: ValueType) binding_type.DataType() = null,
+        to_mode: ?*const fn (alloc: std.mem.Allocator, mode_data: binding_type.DataType()) ValueType = null,
+    };
+}
 
 fn isBind(comptime T: type) bool {
     return std.mem.startsWith(u8, @typeName(T), "zdec.Bind(");
 }
 
-pub fn Bind(comptime bind_type: BindType, comptime PropertyType: type) type {
+pub fn Bind(comptime binding_type: BindingType, comptime PropertyType: type, comptime format: ?[]const u8) type {
+    const ValueType = PropertyType.ValueType;
     return struct {
-        bind_type: BindType = bind_type,
+        binding_type: BindingType = binding_type,
         property: *PropertyType,
+        allocator: std.mem.Allocator = undefined,
+        to_view: ?*const fn (alloc: std.mem.Allocator, prop_value: ValueType) binding_type.DataType() = if (format) |fmt|
+            struct {
+                fn f(alloc: std.mem.Allocator, value: ValueType) ?[:0]u8 {
+                    return std.fmt.allocPrintZ(alloc, fmt, .{value}) catch null;
+                }
+            }.f
+        else
+            null,
+        to_mode: ?*const fn (alloc: std.mem.Allocator, mode_data: binding_type.DataType()) ValueType = null,
 
         const Self = @This();
 
-        pub fn init(property: *PropertyType) Self {
-            return .{ .property = property };
+        pub fn init(self: Self) Self {
+            // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+            var bind = self;
+            // bind.allocator = gpa.allocator();
+            bind.allocator = std.heap.c_allocator;
+            return bind;
         }
 
         pub fn apply(self: Self, widget: anytype) !void {
             const Widget = @TypeOf(widget);
+            // const NativeObj = @TypeOf(widget.obj);
             var bind_id: u32 = PropertyType.InvalidBindId;
+            var widgetEventCallbackAdded = false;
+            const TheBindingInfo = BindingInfo(binding_type, PropertyType);
+            var binding_info = try self.allocator.create(TheBindingInfo);
+            binding_info.allocator = self.allocator;
+            binding_info.property = self.property;
+            binding_info.nativeObj = widget.obj;
+            binding_info.to_view = self.to_view;
+
             std.debug.print("Bind: {s} to {s}\n", .{ @typeName(@TypeOf(self.property)), @typeName(@TypeOf(widget)) });
-            switch (self.bind_type) {
+            switch (self.binding_type) {
                 .Value => {
-                    widget.setValue(self.property.getValue(), lv.AnimEnable.Off); // init widget's value from property
+                    if (@hasDecl(Widget, "setValue")) {
+                        widget.setValue(self.property.getValue(), lv.AnimEnable.Off); // init widget's value from property
+                        bind_id = try self.property.bind(binding_info, struct {
+                            pub fn onValueChanged(the_binding_info: *TheBindingInfo, value: ValueType) void {
+                                if (the_binding_info.nativeObj) |obj| {
+                                    const the_widget = Widget{ .obj = obj };
+                                    the_widget.setValue(value, lv.AnimEnable.On);
+                                }
+                            }
+                        });
 
-                    const Obj = @TypeOf(widget.obj);
-                    bind_id = try self.property.bind(widget.obj, struct {
-                        pub fn onValueChanged(obj: Obj, value: PropertyType.ValueType) void {
-                            const the_widget = Widget{ .obj = obj };
-                            the_widget.setValue(value, lv.AnimEnable.On);
-                        }
-                    });
-
-                    _ = widget.addEventCallback(self.property, struct {
-                        pub fn onValueChanged(event: anytype) void {
-                            const prop = event.userData();
-                            const value = event.target().getValue();
-                            std.debug.print("{s} value: {}\n", .{ @typeName(@TypeOf(event.target())), value });
-                            prop.update(value);
-                        }
-                    });
+                        widgetEventCallbackAdded = widget.addEventCallbacks(binding_info, struct {
+                            pub fn onValueChanged(event: anytype) void {
+                                const the_binding_info = event.getUserData();
+                                if (the_binding_info.property) |prop| {
+                                    const value = event.getTarget().getValue();
+                                    std.debug.print("{s} value: {}\n", .{ @typeName(@TypeOf(event.getTarget())), value });
+                                    _ = prop.setValue(value);
+                                }
+                            }
+                        }) > 0;
+                    }
                 },
 
-                .Text => {},
+                .Text => {
+                    if (@hasDecl(Widget, "setText")) {
+                        // init widget's text from property
+                        if (self.to_view) |to_view| {
+                            const text = to_view(self.allocator, self.property.value);
+                            if (text) |t| {
+                                defer self.allocator.free(t);
+                                widget.setText(t);
+                            }
+                        }
+                        // else if (self.format) |fmt| {
+                        //     const text = std.fmt.allocPrintZ(self.allocator, fmt, .{self.property.value}) catch unreachable;
+
+                        //     defer self.allocator.free(text);
+                        //     widget.setText(text);
+                        // }
+
+                        bind_id = try self.property.bind(binding_info, struct {
+                            pub fn onValueChanged(the_binding_info: *TheBindingInfo, value: ValueType) void {
+                                if (the_binding_info.nativeObj) |obj| {
+                                    const the_widget = Widget{ .obj = obj };
+                                    if (the_binding_info.to_view) |to_view| {
+                                        const text = to_view(the_binding_info.allocator, value);
+                                        if (text) |t| {
+                                            the_widget.setText(t);
+                                            the_binding_info.allocator.free(t);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                },
                 else => {
                     return Error.SyntaxError;
                 },
             }
 
             if (bind_id != PropertyType.InvalidBindId) {
-                _ = widget.addEventCallback(self.property, struct {
+                _ = widget.addEventCallback(binding_info, struct {
                     pub fn onDelete(event: anytype) void {
-                        // std.debug.print("{s} delete\n", .{@typeName(@TypeOf(event.target()))});
                         // unbind widget to property
-                        const prop = event.userData();
-                        prop.unbind(event.target().obj);
+                        var the_binding_info: *TheBindingInfo = event.getUserData();
+                        if (the_binding_info.property) |prop| {
+                            prop.unbind(the_binding_info);
+                            the_binding_info.nativeObj = null;
+                        }
+
+                        the_binding_info.allocator.destroy(the_binding_info);
                     }
                 });
             }
@@ -238,8 +324,11 @@ pub fn buildWidget(parent: anytype, item: anytype) !WidgetType(item[0]) {
             Pos, Size, Align, Label, Range => try field.apply(widget),
             else => {
                 std.debug.print("field type: {s}\n", .{@typeName(T)});
-                if (comptime isBind(T)) {
-                    try field.apply(widget);
+                if (std.meta.trait.is(.Fn)(@TypeOf(field))) {
+                    std.debug.print("{}\n", .{@TypeOf(field)});
+                } else if (comptime isBind(T)) {
+                    var bind = field.init();
+                    try bind.apply(widget);
                 } else if (@hasField(T, "user_data")) {
                     const count = widget.addEventCallbacks(field.user_data, T);
                     if (count == 0) {

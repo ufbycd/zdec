@@ -1,5 +1,8 @@
 const std = @import("std");
 const trait = std.meta.trait;
+const c = @cImport({
+    @cInclude("string.h");
+});
 
 pub const Error = error{
     TypeError,
@@ -17,11 +20,21 @@ pub fn Property(comptime ValueType_: type) type {
         pub const ValueType = ValueType_;
         pub const InvalidBindId: u32 = 0;
 
-        pub const Callback = *const fn (ctx: ?*anyopaque, value: ValueType) void;
+        pub const ValueChangedCallback = *const fn (ctx: ?*anyopaque, value: ValueType) void;
+        pub const DeleteCallback = *const fn (ctx: ?*anyopaque) void;
         pub const Binder = struct {
             ctx: ?*anyopaque,
-            callback: Callback,
+            on_value_changed: ValueChangedCallback,
+            on_delete: ?DeleteCallback = null,
             bind_id: u32,
+
+            pub fn setDeleteCallback(self: Binder, comptime CallbackStruct: type) !void {
+                if (!@hasDecl(CallbackStruct, "onDelete")) {
+                    return Error.MissMatchCallback;
+                }
+
+                self.on_delete = CallbackStruct.onDelete;
+            }
         };
 
         pub fn init(self: *Self, allocator: std.mem.Allocator) void {
@@ -45,34 +58,14 @@ pub fn Property(comptime ValueType_: type) type {
             }
         }
 
+        pub fn eql(self: Self, v: ValueType) bool {
+            return c.memcmp(@ptrCast(&self.value), @ptrCast(&v), @sizeOf(ValueType)) == 0;
+        }
+
         pub fn setValue(self: *Self, v: ValueType) bool {
-            const old_value = self.value;
-            self.value = v;
-
-            // const value_changed = !std.mem.eql(ValueType, old_value, self.value);
-            const value_changed = (old_value != self.value);
+            const value_changed = !self.eql(v);
             if (value_changed) {
-                self.notify();
-            }
-
-            return value_changed;
-        }
-
-        pub fn update(self: *Self, v: anytype) void {
-            const DataType = @TypeOf(v);
-            if (DataType == ValueType) {
                 self.value = v;
-            } else if (trait.isNumber(ValueType)) {} else if (trait.isZigString(ValueType)) {} else if (trait.is(.Enum)(ValueType)) {} else if (trait.isContainer(ValueType)) {} else {
-                @compileError("Unsupported ValueType!\n");
-            }
-        }
-
-        pub fn set(self: *Self, v: anytype) bool {
-            const old_value = self.value;
-            update(v);
-
-            const value_changed = (old_value != self.value);
-            if (value_changed) {
                 self.notify();
             }
 
@@ -92,9 +85,9 @@ pub fn Property(comptime ValueType_: type) type {
                 null;
 
             const callback = struct {
-                fn f(c: ?*anyopaque, value: ValueType) void {
+                fn f(actx: ?*anyopaque, value: ValueType) void {
                     if (CtxType != @TypeOf(null)) {
-                        const the_ctx: CtxType = @alignCast(@ptrCast(c.?));
+                        const the_ctx: CtxType = @alignCast(@ptrCast(actx.?));
                         CallbackStruct.onValueChanged(the_ctx, value);
                     } else {
                         CallbackStruct.onValueChanged(value);
@@ -103,7 +96,7 @@ pub fn Property(comptime ValueType_: type) type {
             }.f;
 
             bind_id = self.next_bind_id;
-            try self.binders.append(Binder{ .ctx = any_ctx, .callback = callback, .bind_id = bind_id });
+            try self.binders.append(Binder{ .ctx = any_ctx, .on_value_changed = callback, .bind_id = bind_id });
             self.next_bind_id += 1;
 
             return bind_id;
@@ -125,7 +118,7 @@ pub fn Property(comptime ValueType_: type) type {
                 if (binder.ctx) |binded_ctx| {
                     if (binded_ctx == the_ctx) {
                         _ = self.binders.swapRemove(i);
-                        std.debug.print("{s} unbind {s}\n", .{ @typeName(Self), @typeName(CtxType) });
+                        std.debug.print("unbind {s}\n", .{@typeName(CtxType)});
                     }
                 }
             }
@@ -133,84 +126,8 @@ pub fn Property(comptime ValueType_: type) type {
 
         pub fn notify(self: Self) void {
             for (self.binders.items) |binder| {
-                binder.callback(binder.ctx, self.value);
+                binder.on_value_changed(binder.ctx, self.value);
             }
         }
     };
 }
-
-pub const Type = enum {
-    Integral,
-    //     float,
-    String,
-    //     pos,
-    //     size,
-    //     alignment,
-    //     style,
-    //     states,
-    //     flags,
-};
-
-pub const Integral = struct {
-    value: i32 = 0,
-
-    pub fn get(self: Integral, comptime ValueType: type) ValueType {
-        if (trait.isIntegral(ValueType)) {
-            return @intCast(self.value);
-        } else if (trait.isFloat(ValueType)) {
-            return @floatCast(self.value);
-        } else if (trait.isZigString(ValueType)) {
-            var buf: [32:0]u8 = undefined;
-            return std.fmt.bufPrintZ(buf, "{d}", self.value) catch |e| @errorName(e);
-        } else {
-            @compileError("Unsupported ValueType!\n");
-        }
-    }
-
-    pub fn set(self: Integral, v: anytype) bool {
-        const ValueType = @TypeOf(v);
-        const old_value = self.value;
-        if (trait.isNumber(ValueType)) {
-            self.value = @intCast(v);
-        } else if (trait.isZigString(ValueType)) {
-            self.value = std.fmt.parseInt(@TypeOf(self.value), v, 10) catch 0;
-        } else {
-            @compileError("Unsupported ValueType!\n");
-        }
-
-        return old_value != self.value;
-    }
-};
-
-pub const String = struct {
-    value: []const u8 = "",
-    number_buf: [64]u8,
-
-    pub fn get(self: Integral, comptime ValueType: type) ValueType {
-        if (trait.isIntegral(ValueType)) {
-            return std.fmt.parseInt(ValueType, self.value, 10) catch 0;
-        } else if (trait.isFloat(ValueType)) {
-            return std.fmt.parseFloat(ValueType, self.value) catch 0;
-        } else if (trait.isZigString(ValueType)) {
-            return self.value;
-        } else {
-            @compileError("Unsupported ValueType!\n");
-        }
-    }
-
-    pub fn set(self: Integral, v: anytype) bool {
-        const ValueType = @TypeOf(v);
-        const old_value = self.value;
-        if (trait.isIntegral(ValueType)) {
-            self.value = std.fmt.bufPrintZ(self.number_buf, "{d}", .{v}) catch "";
-        } else if (trait.isFloat(ValueType)) {
-            self.value = std.fmt.bufPrintZ(self.number_buf, "{f}", .{v}) catch "";
-        } else if (trait.isZigString(ValueType)) {
-            self.value = v;
-        } else {
-            @compileError("Unsupported ValueType!\n");
-        }
-
-        return !std.mem.eql(u8, old_value, self.value);
-    }
-};

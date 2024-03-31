@@ -9,13 +9,12 @@
             d.Size{ .width = 160, .height = 48 },
             d.Align{ .lv_align = .Center, .y_ofs = -100 },
             d.Text{ .text = "button" },
+            d.Bind(.Text, @TypeOf(_model.count), "count: {d}"){ .property = &_model.count },
             struct {
                 user_data: *Model,
                 pub fn onClicked(event: anytype) void {
-                    const the_model = event.userData();
-                    const step = 10;
-                    std.debug.print("{s}: add Model.count by {d}\n", .{ @typeName(@TypeOf(event.target())), step });
-                    the_model.add(step);
+                    const the_model = event.getUserData();
+                    the_model.add(10);
                 }
             }{ .user_data = &_model },
         },
@@ -24,7 +23,7 @@
             d.Size{ .width = 240, .height = 16 },
             d.Align{ .lv_align = .Center, .y_ofs = 100 },
             d.Range{ .min = 0, .max = 200 },
-            d.Bind(d.BindType.Value, @TypeOf(_model.count)){ .property = &_model.count },
+            d.Bind(.Value, @TypeOf(_model.count), null){ .property = &_model.count },
         },
     };
 

@@ -23,8 +23,6 @@ const Model = struct {
     }
 };
 
-var _step: i32 = 2;
-
 pub fn main() !void {
     lv.init();
     defer lv.deinit();
@@ -46,13 +44,12 @@ pub fn main() !void {
             d.Size{ .width = 160, .height = 48 },
             d.Align{ .lv_align = .Center, .y_ofs = -100 },
             d.Text{ .text = "button" },
+            d.Bind(.Text, @TypeOf(_model.count), "count: {d}"){ .property = &_model.count },
             struct {
                 user_data: *Model,
                 pub fn onClicked(event: anytype) void {
-                    const the_model = event.userData();
-                    const step = 10;
-                    std.debug.print("{s}: add Model.count by {d}\n", .{ @typeName(@TypeOf(event.target())), step });
-                    the_model.add(step);
+                    const the_model = event.getUserData();
+                    the_model.add(10);
                 }
             }{ .user_data = &_model },
         },
@@ -61,7 +58,7 @@ pub fn main() !void {
             d.Size{ .width = 240, .height = 16 },
             d.Align{ .lv_align = .Center, .y_ofs = 100 },
             d.Range{ .min = 0, .max = 200 },
-            d.Bind(d.BindType.Value, @TypeOf(_model.count)){ .property = &_model.count },
+            d.Bind(.Value, @TypeOf(_model.count), null){ .property = &_model.count },
         },
     };
 
@@ -77,4 +74,26 @@ pub fn main() !void {
         const next_ms = lv.timer.handler();
         std.time.sleep(next_ms * 1_000_000); // sleep 10ms
     }
+}
+
+test "closure" {
+    var s: usize = 1;
+    s += 1;
+
+    const closure = (struct {
+        var hidden_variable: usize = 0;
+        fn init(state: usize) *const @TypeOf(add) {
+            hidden_variable = state;
+            return &add;
+        }
+
+        fn add() usize {
+            std.debug.print("{}\n", .{hidden_variable});
+            hidden_variable += 1;
+            return hidden_variable;
+        }
+    }).init(s);
+
+    std.debug.print("{}\n", .{@TypeOf(closure)});
+    try std.testing.expect(closure() == 3);
 }
